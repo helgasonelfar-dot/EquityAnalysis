@@ -1,0 +1,19 @@
+name: Sync to Hugging Face
+on:
+  push:
+    branches: [main] # Eða sú grein sem þú notar (t.d. master)
+  workflow_dispatch: # Gerir þér kleift að keyra þetta handvirkt
+
+jobs:
+  sync-to-hub:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+          lfs: true
+      - name: Push to hub
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          git push --force https://elffhel:$HF_TOKEN@huggingface.co/spaces/elffhel/Equity_Analysis main
