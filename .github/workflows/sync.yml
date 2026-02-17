@@ -16,4 +16,4 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-            git push --force https://elffhel:${{ secrets.HF_TOKEN }}@huggingface.co/spaces/elffhel/Equity_Analysis mains main
+          git push --force https://elffhel:$HF_TOKEN@huggingface.co/spaces/elffhel/Equity_Analysis main
