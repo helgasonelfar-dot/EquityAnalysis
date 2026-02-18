@@ -321,7 +321,7 @@ def main():
             'Bank': ticker,
             'Current Price': f"{data['current_share_price']:.2f}",
             'Intrinsic Value': intrinsic_value_str,
-            'Difference (Intrinsic - Current)': difference,
+            'Difference': difference,
             'Normalized ROE': f"{current_roe:.2%}",
             'Cost of Equity (Ke)': f"{current_ke:.2%}",
             'Stable Growth Rate': f"{stable_growth_rate:.2%}"
