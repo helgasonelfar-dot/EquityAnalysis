@@ -60,102 +60,108 @@ def fetch_and_process_bank_data():
     messages = [] # Collect messages to display later
 
     for ticker_symbol in icelandic_bank_tickers:
+        # Initialize with defaults to handle partial data or errors gracefully
+        current_share_price = np.nan
+        latest_bvps = np.nan
+        normalized_roe = np.nan
+        bvps_growth_rate = 0.0 # Default growth to 0 if not calculable
+
         try:
             bank = yf.Ticker(ticker_symbol)
 
             # Get current share price
-            # Fetching a short period ensures the latest price, handling potential empty data
             history_1d = bank.history(period="1d")
-            current_share_price = history_1d['Close'].iloc[-1] if not history_1d.empty else np.nan
+            if not history_1d.empty:
+                current_share_price = history_1d['Close'].iloc[-1]
+            else:
+                messages.append(f"Warning: Could not retrieve current share price for {ticker_symbol}. Setting to NaN.")
+
 
             # Fetch quarterly financial statements
             quarterly_financials = bank.quarterly_financials
             quarterly_balance_sheet = bank.quarterly_balance_sheet
 
             if quarterly_financials.empty or quarterly_balance_sheet.empty:
-                messages.append(f"Warning: Could not retrieve sufficient quarterly financial statements for {ticker_symbol}. Skipping data processing.")
-                continue
+                messages.append(f"Warning: Could not retrieve sufficient quarterly financial statements for {ticker_symbol}. BVPS, ROE calculations might be affected.")
+                # Will continue with initialized np.nan/0.0 values
+            else:
+                # Net Income (most recent first)
+                net_income_q = quarterly_financials.loc['Net Income'].sort_index(ascending=False)
 
-            # Net Income (most recent first)
-            net_income_q = quarterly_financials.loc['Net Income'].sort_index(ascending=False)
+                # Shareholder Equity (most recent first) - handle different possible names
+                shareholder_equity_rows = [
+                    'Total Stockholder Equity',
+                    'Stockholders Equity',
+                    'Total Equity',
+                    'Equity Attributable To Owners Of Parent',
+                    'Common Stock Equity'
+                ]
+                shareholder_equity_q = pd.Series(dtype=float)
+                for row_name in shareholder_equity_rows:
+                    if row_name in quarterly_balance_sheet.index:
+                        shareholder_equity_q = quarterly_balance_sheet.loc[row_name].sort_index(ascending=False)
+                        break
 
-            # Shareholder Equity (most recent first) - handle different possible names
-            shareholder_equity_rows = [
-                'Total Stockholder Equity',
-                'Stockholders Equity',
-                'Total Equity',
-                'Equity Attributable To Owners Of Parent',
-                'Common Stock Equity'
-            ]
-            shareholder_equity_q = pd.Series(dtype=float)
-            for row_name in shareholder_equity_rows:
-                if row_name in quarterly_balance_sheet.index:
-                    shareholder_equity_q = quarterly_balance_sheet.loc[row_name].sort_index(ascending=False)
-                    break
+                if shareholder_equity_q.empty:
+                    messages.append(f"Warning: Could not find Shareholder Equity for {ticker_symbol}. BVPS, ROE calculations might be affected.")
+                else:
+                    # Retrieve current outstanding shares
+                    num_shares_current = bank.info.get('sharesOutstanding')
+                    if num_shares_current is None or num_shares_current == 0:
+                        messages.append(f"Warning: Could not find outstanding shares for {ticker_symbol}. Cannot calculate BVPS and TTM ROE accurately.")
+                    else:
+                        num_shares_current = float(num_shares_current)
 
-            if shareholder_equity_q.empty:
-                messages.append(f"Warning: Could not find Shareholder Equity for {ticker_symbol}. Skipping data processing.")
-                continue
+                        # Latest BVPS
+                        latest_bvps = shareholder_equity_q.iloc[0] / num_shares_current
 
-            # Retrieve current outstanding shares
-            num_shares_current = bank.info.get('sharesOutstanding')
-            if num_shares_current is None or num_shares_current == 0:
-                messages.append(f"Warning: Could not find outstanding shares for {ticker_symbol}. Cannot calculate BVPS and TTM ROE accurately. Skipping.")
-                continue
-            num_shares_current = float(num_shares_current)
+                        # Calculate TTM Net Income and Normalized ROE
+                        if len(net_income_q) >= 4 and len(shareholder_equity_q) >= 4:
+                            # Align NI and SE by date, then ensure enough data for TTM
+                            combined_q_data = pd.DataFrame({
+                                'Net Income': net_income_q,
+                                'Shareholder Equity': shareholder_equity_q
+                            }).sort_index(ascending=True).dropna()
 
-            # Latest BVPS
-            latest_bvps = shareholder_equity_q.iloc[0] / num_shares_current if not shareholder_equity_q.empty else np.nan
+                            if len(combined_q_data) >= 4:
+                                ttm_net_income_series = combined_q_data['Net Income'].rolling(window=4).sum().dropna()
+                                aligned_shareholder_equity = combined_q_data['Shareholder Equity'][ttm_net_income_series.index]
 
-            # Calculate TTM Net Income and Normalized ROE
-            normalized_roe = np.nan
-            if len(net_income_q) >= 4 and len(shareholder_equity_q) >= 4:
-                # Align NI and SE by date, then ensure enough data for TTM
-                combined_q_data = pd.DataFrame({
-                    'Net Income': net_income_q,
-                    'Shareholder Equity': shareholder_equity_q
-                }).sort_index(ascending=True).dropna()
-
-                if len(combined_q_data) >= 4:
-                    ttm_net_income_series = combined_q_data['Net Income'].rolling(window=4).sum().dropna()
-                    aligned_shareholder_equity = combined_q_data['Shareholder Equity'][ttm_net_income_series.index]
-
-                    if not ttm_net_income_series.empty and not aligned_shareholder_equity.empty:
-                        ttm_roe_series = ttm_net_income_series / aligned_shareholder_equity
-                        if not ttm_roe_series.empty:
-                            normalized_roe = ttm_roe_series.mean()
+                                if not ttm_net_income_series.empty and not aligned_shareholder_equity.empty:
+                                    ttm_roe_series = ttm_net_income_series / aligned_shareholder_equity
+                                    if not ttm_roe_series.empty:
+                                        normalized_roe = ttm_roe_series.mean()
+                                    else:
+                                        messages.append(f"Warning: Could not calculate TTM ROE series for {ticker_symbol}.")
+                                else:
+                                    messages.append(f"Warning: Not enough aligned data for TTM Net Income and Shareholder Equity for {ticker_symbol}.")
+                            else:
+                                messages.append(f"Warning: Not enough quarterly data (less than 4 combined quarters) to calculate TTM Net Income and Normalized ROE for {ticker_symbol}.")
                         else:
-                            messages.append(f"Warning: Could not calculate TTM ROE series for {ticker_symbol}.")
-                    else:
-                        messages.append(f"Warning: Not enough aligned data for TTM Net Income and Shareholder Equity for {ticker_symbol}.")
-                else:
-                    messages.append(f"Warning: Not enough quarterly data (less than 4 combined quarters) to calculate TTM Net Income and Normalized ROE for {ticker_symbol}.")
-            else:
-                messages.append(f"Warning: Not enough quarterly data (less than 4 quarters) to calculate TTM Net Income and Normalized ROE for {ticker_symbol}.")
+                            messages.append(f"Warning: Not enough quarterly data (less than 4 quarters) to calculate TTM Net Income and Normalized ROE for {ticker_symbol}.")
 
-            # Calculate BVPS Growth Rate (CAGR) from quarterly BVPS
-            bvps_growth_rate = 0.0
-            if num_shares_current > 0 and not shareholder_equity_q.empty:
-                # Calculate historical quarterly BVPS. Use the current shares outstanding for simplicity across history.
-                quarterly_bvps_series = (shareholder_equity_q.sort_index(ascending=True) / num_shares_current).dropna()
+                        # Calculate BVPS Growth Rate (CAGR) from quarterly BVPS
+                        if not shareholder_equity_q.empty:
+                            # Calculate historical quarterly BVPS. Use the current shares outstanding for simplicity across history.
+                            quarterly_bvps_series = (shareholder_equity_q.sort_index(ascending=True) / num_shares_current).dropna()
 
-                if len(quarterly_bvps_series) >= 4: # Need at least 1 year of quarterly data for an annualized growth rate
-                    num_quarters_for_growth = min(len(quarterly_bvps_series), 12) # Use last 12 quarters (3 years) if available
+                            if len(quarterly_bvps_series) >= 4: # Need at least 1 year of quarterly data for an annualized growth rate
+                                num_quarters_for_growth = min(len(quarterly_bvps_series), 12) # Use last 12 quarters (3 years) if available
 
-                    beginning_bvps_growth = quarterly_bvps_series.iloc[-num_quarters_for_growth]
-                    ending_bvps_growth = quarterly_bvps_series.iloc[-1]
+                                beginning_bvps_growth = quarterly_bvps_series.iloc[-num_quarters_for_growth]
+                                ending_bvps_growth = quarterly_bvps_series.iloc[-1]
 
-                    if beginning_bvps_growth > 0:
-                        # Annualize growth rate: (Ending/Beginning)^(1 / (num_quarters/4)) - 1
-                        bvps_growth_rate = (ending_bvps_growth / beginning_bvps_growth)**(4 / num_quarters_for_growth) - 1
-                    else:
-                        messages.append(f"Warning: Beginning BVPS is zero or negative for growth calculation for {ticker_symbol}. BVPS growth rate set to 0.")
-                else:
-                    messages.append(f"Warning: Not enough quarterly BVPS data to calculate historical BVPS growth rate for {ticker_symbol}. BVPS growth rate set to 0.")
-            else:
-                messages.append(f"Warning: Shares outstanding or quarterly equity data missing for {ticker_symbol}. BVPS growth rate set to 0.")
+                                if beginning_bvps_growth > 0:
+                                    # Annualize growth rate: (Ending/Beginning)^(1 / (num_quarters/4)) - 1
+                                    bvps_growth_rate = (ending_bvps_growth / beginning_bvps_growth)**(4 / num_quarters_for_growth) - 1
+                                else:
+                                    messages.append(f"Warning: Beginning BVPS is zero or negative for growth calculation for {ticker_symbol}. BVPS growth rate set to 0.")
+                            else:
+                                messages.append(f"Warning: Not enough quarterly BVPS data to calculate historical BVPS growth rate for {ticker_symbol}. BVPS growth rate set to 0.")
+                        else:
+                            messages.append(f"Warning: Shares outstanding or quarterly equity data missing for {ticker_symbol}. BVPS growth rate set to 0.")
 
-            # Store processed data, ensuring defaults if calculations failed
+            # Store processed data, ensuring defaults if calculations failed or incomplete
             bank_data[ticker_symbol] = {
                 'latest_bvps': latest_bvps if not pd.isna(latest_bvps) else 0.0,
                 'normalized_roe': normalized_roe if not pd.isna(normalized_roe) else 0.0,
@@ -164,7 +170,7 @@ def fetch_and_process_bank_data():
             }
 
         except Exception as e:
-            messages.append(f"Error fetching or processing data for {ticker_symbol}: {e}")
+            messages.append(f"Error fetching or processing ALL data for {ticker_symbol}: {e}")
             bank_data[ticker_symbol] = { # Ensure the entry exists even on error with default values
                 'latest_bvps': 0.0,
                 'normalized_roe': 0.0,
@@ -321,7 +327,7 @@ def main():
             'Bank': ticker,
             'Current Price': f"{data['current_share_price']:.2f}",
             'Intrinsic Value': intrinsic_value_str,
-            'Difference': difference,
+            'Difference (Intrinsic - Current)': difference,
             'Normalized ROE': f"{current_roe:.2%}",
             'Cost of Equity (Ke)': f"{current_ke:.2%}",
             'Stable Growth Rate': f"{stable_growth_rate:.2%}"
