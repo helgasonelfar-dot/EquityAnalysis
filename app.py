@@ -70,12 +70,9 @@ def fetch_and_process_bank_data():
             bank = yf.Ticker(ticker_symbol)
 
             # Get current share price
+            # Fetching a short period ensures the latest price, handling potential empty data
             history_1d = bank.history(period="1d")
-            if not history_1d.empty:
-                current_share_price = history_1d['Close'].iloc[-1]
-            else:
-                messages.append(f"Warning: Could not retrieve current share price for {ticker_symbol}. Setting to NaN.")
-
+            current_share_price = history_1d['Close'].iloc[-1] if not history_1d.empty else np.nan
 
             # Fetch quarterly financial statements
             quarterly_financials = bank.quarterly_financials
@@ -97,13 +94,31 @@ def fetch_and_process_bank_data():
                     'Common Stock Equity'
                 ]
                 shareholder_equity_q = pd.Series(dtype=float)
+                found_equity_directly = False
                 for row_name in shareholder_equity_rows:
                     if row_name in quarterly_balance_sheet.index:
                         shareholder_equity_q = quarterly_balance_sheet.loc[row_name].sort_index(ascending=False)
+                        found_equity_directly = True
                         break
 
+                if shareholder_equity_q.empty or not found_equity_directly:
+                    # Fallback: Calculate Shareholder Equity as Total Assets - Total Liabilities
+                    if 'Total Assets' in quarterly_balance_sheet.index and 'Total Liabilities' in quarterly_balance_sheet.index:
+                        total_assets = quarterly_balance_sheet.loc['Total Assets'].sort_index(ascending=False)
+                        total_liabilities = quarterly_balance_sheet.loc['Total Liabilities'].sort_index(ascending=False)
+
+                        # Align by date
+                        common_dates_for_derived_equity = total_assets.index.intersection(total_liabilities.index)
+                        if not common_dates_for_derived_equity.empty:
+                            shareholder_equity_q = (total_assets[common_dates_for_derived_equity] - total_liabilities[common_dates_for_derived_equity]).rename('Derived Shareholder Equity')
+                            messages.append(f"Warning: Shareholder Equity not found directly for {ticker_symbol}. Derived from Total Assets - Total Liabilities.")
+                        else:
+                            messages.append(f"Warning: Could not derive Shareholder Equity for {ticker_symbol} from Total Assets - Total Liabilities. Skipping.")
+                    else:
+                        messages.append(f"Warning: Could not find Shareholder Equity directly or derive it from Total Assets/Liabilities for {ticker_symbol}. Skipping.")
+
                 if shareholder_equity_q.empty:
-                    messages.append(f"Warning: Could not find Shareholder Equity for {ticker_symbol}. BVPS, ROE calculations might be affected.")
+                    messages.append(f"Warning: Final Shareholder Equity is empty for {ticker_symbol}. BVPS, ROE calculations might be affected.")
                 else:
                     # Retrieve current outstanding shares
                     num_shares_current = bank.info.get('sharesOutstanding')
@@ -113,7 +128,7 @@ def fetch_and_process_bank_data():
                         num_shares_current = float(num_shares_current)
 
                         # Latest BVPS
-                        latest_bvps = shareholder_equity_q.iloc[0] / num_shares_current
+                        latest_bvps = shareholder_equity_q.iloc[0] / num_shares_current if not shareholder_equity_q.empty else np.nan
 
                         # Calculate TTM Net Income and Normalized ROE
                         if len(net_income_q) >= 4 and len(shareholder_equity_q) >= 4:
@@ -141,6 +156,7 @@ def fetch_and_process_bank_data():
                             messages.append(f"Warning: Not enough quarterly data (less than 4 quarters) to calculate TTM Net Income and Normalized ROE for {ticker_symbol}.")
 
                         # Calculate BVPS Growth Rate (CAGR) from quarterly BVPS
+                        bvps_growth_rate = 0.0
                         if not shareholder_equity_q.empty:
                             # Calculate historical quarterly BVPS. Use the current shares outstanding for simplicity across history.
                             quarterly_bvps_series = (shareholder_equity_q.sort_index(ascending=True) / num_shares_current).dropna()
@@ -244,10 +260,8 @@ def main():
 
     # Global Inputs (Sidebar)
     st.sidebar.header("Global Valuation Inputs")
-    risk_free_rate = st.sidebar.slider('Risk-Free Rate (Rf)', min_value=0.00, max_value=0.10, value=0.035, step=0.001, format='%.3f')
-    equity_risk_premium = st.sidebar.slider('Equity Risk Premium (ERP)', min_value=0.01, max_value=0.10, value=0.055, step=0.001, format='%.3f')
-    forecast_period = st.sidebar.slider('Explicit Forecast Period (Years)', min_value=1, max_value=10, value=5, step=1)
-    stable_growth_rate = st.sidebar.slider('Stable Growth Rate (g)', min_value=0.00, max_value=0.05, value=0.025, step=0.001, format='%.3f')
+    risk_free_rate = st.sidebar.slider('Risk-Free Rate (Rf)', min_value=0.00, max_value=0.10, value=0.065, step=0.001, format='%.3f')
+    equity_risk_premium = st.sidebar.slider('Equity Risk Premium (ERP)', min_value=0.01, max_value=0.10, value=0.0575, step=0.001, format='%.3f')
 
     # Bank-Specific Inputs
     st.header("Bank-Specific Inputs")
@@ -255,6 +269,8 @@ def main():
 
     user_beta_values = {}
     user_normalized_roes = {}
+    user_forecast_periods = {}
+    user_stable_growth_rates = {}
 
     calculated_cost_of_equities = {}
 
@@ -275,15 +291,33 @@ def main():
                 key=f'beta_{ticker}'
             )
 
-            # Use dynamically calculated normalized_roe as default value
             user_normalized_roes[ticker] = st.number_input(
                 f'Normalized ROE for {ticker}',
                 min_value=0.00,
                 max_value=0.25,
-                value=data['normalized_roe'], # Use dynamically calculated normalized ROE
+                value=data['normalized_roe'],
                 step=0.005,
                 format='%.3f',
                 key=f'roe_{ticker}'
+            )
+
+            user_forecast_periods[ticker] = st.number_input(
+                f'Explicit Forecast Period (Years) for {ticker}',
+                min_value=1,
+                max_value=10,
+                value=5,
+                step=1,
+                key=f'forecast_period_{ticker}'
+            )
+
+            user_stable_growth_rates[ticker] = st.number_input(
+                f'Stable Growth Rate (g) for {ticker}',
+                min_value=0.00,
+                max_value=0.05,
+                value=0.025,
+                step=0.001,
+                format='%.3f',
+                key=f'stable_growth_rate_{ticker}'
             )
 
             cost_of_equity = risk_free_rate + (user_beta_values[ticker] * equity_risk_premium)
@@ -299,21 +333,23 @@ def main():
     for ticker, data in bank_data.items():
         current_ke = calculated_cost_of_equities[ticker]
         current_roe = user_normalized_roes[ticker]
+        current_forecast_period = user_forecast_periods[ticker]
+        current_stable_growth_rate = user_stable_growth_rates[ticker]
 
         # This is a local copy of bank_data for use within the loop, including current user inputs
         data_for_current_valuation = data.copy() # Avoid modifying the original bank_data directly
         data_for_current_valuation['normalized_roe'] = current_roe
         data_for_current_valuation['cost_of_equity'] = current_ke
-        data_for_current_valuation['forecast_period'] = forecast_period # Pass current forecast period
-        data_for_current_valuation['stable_growth_rate'] = stable_growth_rate # Pass current stable growth rate
+        data_for_current_valuation['forecast_period'] = current_forecast_period
+        data_for_current_valuation['stable_growth_rate'] = current_stable_growth_rate
 
         intrinsic_value = calculate_erm_valuation_adjustable(
             latest_bvps=data_for_current_valuation['latest_bvps'],
             normalized_roe=current_roe,
             cost_of_equity=current_ke,
             bvps_growth_rate=data_for_current_valuation['bvps_growth_rate'],
-            forecast_period=forecast_period,
-            stable_growth_rate=stable_growth_rate
+            forecast_period=current_forecast_period,
+            stable_growth_rate=current_stable_growth_rate
         )
 
         if np.isnan(intrinsic_value):
@@ -330,7 +366,8 @@ def main():
             'Difference (Intrinsic - Current)': difference,
             'Normalized ROE': f"{current_roe:.2%}",
             'Cost of Equity (Ke)': f"{current_ke:.2%}",
-            'Stable Growth Rate': f"{stable_growth_rate:.2%}"
+            'Forecast Period': current_forecast_period,
+            'Stable Growth Rate': f"{current_stable_growth_rate:.2%}"
         })
 
         # Define sensitivity ranges based on current user inputs for this bank
@@ -383,8 +420,8 @@ def main():
                     'normalized_roe': user_normalized_roes[ticker],
                     'cost_of_equity': calculated_cost_of_equities[ticker],
                     'bvps_growth_rate': bank_data[ticker]['bvps_growth_rate'],
-                    'forecast_period': forecast_period,
-                    'stable_growth_rate': stable_growth_rate
+                    'forecast_period': user_forecast_periods[ticker],
+                    'stable_growth_rate': user_stable_growth_rates[ticker]
                 }
 
                 # Define numerical ranges for plotting axes based on initial_params_for_plotting
@@ -397,7 +434,7 @@ def main():
 
 
                 # Get the current stable growth rate for this bank, as used in the sensitivity ranges
-                current_sgr_for_table = stable_growth_rate # Use the global stable growth rate from the slider
+                current_sgr_for_table = user_stable_growth_rates[ticker] # Use the global stable growth rate from the slider
 
                 # Sensitivity of Intrinsic Value to ROE and Ke (fixing SGR at current global value)
                 # Filter by the exact current_sgr_for_table, or the closest value in the sgr_sens_range if exact match not present
