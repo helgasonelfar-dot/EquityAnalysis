@@ -49,23 +49,17 @@ def calculate_erm_valuation_adjustable(latest_bvps, normalized_roe, cost_of_equi
 
 # --- Dynamic Data Fetching and Calculation for Streamlit App (moved into a function) ---
 @st.cache_data(ttl=3600) # Cache data for 1 hour to reduce API calls
-def fetch_and_process_company_data(): # Renamed function
-    icelandic_company_tickers = [ # Redefined variable to include type
-        {'ticker': 'ISB.IC', 'type': 'bank'}, # Íslandsbanki
-        {'ticker': 'KVIKA.IC', 'type': 'bank'}, # Kvika banki
-        {'ticker': 'ARION.IC', 'type': 'bank'},  # Arion banki
-        {'ticker': 'REITIR.IC', 'type': 'real_estate'}, # Reitir fasteignafélag hf.
-        {'ticker': 'RGINN.IC', 'type': 'real_estate'}, # Reginn hf.
-        {'ticker': 'EIK.IC', 'type': 'real_estate'}   # Eik fasteignafélag hf.
+def fetch_and_process_bank_data():
+    icelandic_bank_tickers = [
+        "ISB.IC", # Íslandsbanki
+        "KVIKA.IC", # Kvika banki
+        "ARION.IC"  # Arion banki
     ]
 
-    company_data = {} # Renamed variable
+    bank_data = {}
     messages = [] # Collect messages to display later
 
-    for company_info in icelandic_company_tickers: # Updated loop to iterate through dictionaries
-        ticker_symbol = company_info['ticker']
-        company_type = company_info['type'] # Extract company type
-
+    for ticker_symbol in icelandic_bank_tickers:
         # Initialize with defaults to handle partial data or errors gracefully
         current_share_price = np.nan
         latest_bvps = np.nan
@@ -73,38 +67,23 @@ def fetch_and_process_company_data(): # Renamed function
         bvps_growth_rate = 0.0 # Default growth to 0 if not calculable
 
         try:
-            company = yf.Ticker(ticker_symbol) # Renamed variable
+            bank = yf.Ticker(ticker_symbol)
 
             # Get current share price
-            history_1d = company.history(period="1d") # Renamed variable
-            if not history_1d.empty:
-                current_share_price = history_1d['Close'].iloc[-1]
-            else:
-                messages.append(f"Warning: Could not retrieve current share price for {ticker_symbol}. Setting to NaN.")
+            # Fetching a short period ensures the latest price, handling potential empty data
+            history_1d = bank.history(period="1d")
+            current_share_price = history_1d['Close'].iloc[-1] if not history_1d.empty else np.nan
 
             # Fetch quarterly financial statements
-            quarterly_financials = company.quarterly_financials # Renamed variable
-            quarterly_balance_sheet = company.quarterly_balance_sheet # Renamed variable
+            quarterly_financials = bank.quarterly_financials
+            quarterly_balance_sheet = bank.quarterly_balance_sheet
 
             if quarterly_financials.empty or quarterly_balance_sheet.empty:
                 messages.append(f"Warning: Could not retrieve sufficient quarterly financial statements for {ticker_symbol}. BVPS, ROE calculations might be affected.")
                 # Will continue with initialized np.nan/0.0 values
             else:
-                # Net Income (most recent first) - Expanded search for robustness
-                net_income_q = pd.Series(dtype=float)
-                net_income_rows = [
-                    'Net Income',
-                    'NetIncome',
-                    'Net Income Common Stockholders',
-                    'Net Income Including Noncontrolling Interests'
-                ]
-                for row_name in net_income_rows:
-                    if row_name in quarterly_financials.index:
-                        net_income_q = quarterly_financials.loc[row_name].sort_index(ascending=False)
-                        break
-
-                if net_income_q.empty:
-                    messages.append(f"Warning: 'Net Income' not found in quarterly financials for {ticker_symbol} under common names. Skipping related calculations.")
+                # Net Income (most recent first)
+                net_income_q = quarterly_financials.loc['Net Income'].sort_index(ascending=False)
 
                 # Shareholder Equity (most recent first) - handle different possible names
                 shareholder_equity_rows = [
@@ -142,7 +121,7 @@ def fetch_and_process_company_data(): # Renamed function
                     messages.append(f"Warning: Final Shareholder Equity is empty for {ticker_symbol}. BVPS, ROE calculations might be affected.")
                 else:
                     # Retrieve current outstanding shares
-                    num_shares_current = company.info.get('sharesOutstanding') # Renamed variable
+                    num_shares_current = bank.info.get('sharesOutstanding')
                     if num_shares_current is None or num_shares_current == 0:
                         messages.append(f"Warning: Could not find outstanding shares for {ticker_symbol}. Cannot calculate BVPS and TTM ROE accurately.")
                     else:
@@ -152,7 +131,7 @@ def fetch_and_process_company_data(): # Renamed function
                         latest_bvps = shareholder_equity_q.iloc[0] / num_shares_current if not shareholder_equity_q.empty else np.nan
 
                         # Calculate TTM Net Income and Normalized ROE
-                        if not net_income_q.empty and len(net_income_q) >= 4 and len(shareholder_equity_q) >= 4:
+                        if len(net_income_q) >= 4 and len(shareholder_equity_q) >= 4:
                             # Align NI and SE by date, then ensure enough data for TTM
                             combined_q_data = pd.DataFrame({
                                 'Net Income': net_income_q,
@@ -174,7 +153,7 @@ def fetch_and_process_company_data(): # Renamed function
                             else:
                                 messages.append(f"Warning: Not enough quarterly data (less than 4 combined quarters) to calculate TTM Net Income and Normalized ROE for {ticker_symbol}.")
                         else:
-                            messages.append(f"Warning: Not enough quarterly data (less than 4 quarters) or missing Net Income to calculate TTM Net Income and Normalized ROE for {ticker_symbol}.")
+                            messages.append(f"Warning: Not enough quarterly data (less than 4 quarters) to calculate TTM Net Income and Normalized ROE for {ticker_symbol}.")
 
                         # Calculate BVPS Growth Rate (CAGR) from quarterly BVPS
                         bvps_growth_rate = 0.0
@@ -199,26 +178,24 @@ def fetch_and_process_company_data(): # Renamed function
                             messages.append(f"Warning: Shares outstanding or quarterly equity data missing for {ticker_symbol}. BVPS growth rate set to 0.")
 
             # Store processed data, ensuring defaults if calculations failed or incomplete
-            company_data[ticker_symbol] = { # Renamed variable
+            bank_data[ticker_symbol] = {
                 'latest_bvps': latest_bvps if not pd.isna(latest_bvps) else 0.0,
                 'normalized_roe': normalized_roe if not pd.isna(normalized_roe) else 0.0,
                 'bvps_growth_rate': bvps_growth_rate,
-                'current_share_price': current_share_price if not pd.isna(current_share_price) else 0.0,
-                'type': company_type # Store company type
+                'current_share_price': current_share_price if not pd.isna(current_share_price) else 0.0
             }
 
         except Exception as e:
             messages.append(f"Error fetching or processing ALL data for {ticker_symbol}: {e}")
-            company_data[ticker_symbol] = { # Ensure the entry exists even on error with default values
+            bank_data[ticker_symbol] = { # Ensure the entry exists even on error with default values
                 'latest_bvps': 0.0,
                 'normalized_roe': 0.0,
                 'bvps_growth_rate': 0.0,
-                'current_share_price': 0.0,
-                'type': company_type # Store company type even on error
+                'current_share_price': 0.0
             }
             continue
 
-    return company_data, messages # Renamed variable
+    return bank_data, messages
 
 
 
@@ -227,16 +204,13 @@ def fetch_and_process_company_data(): # Renamed function
 initial_beta_values = {
     'ISB.IC': 1.1,
     'KVIKA.IC': 1.2,
-    'ARION.IC': 1.0,
-    'REITIR.IC': 0.8, # Placeholder for Reitir
-    'RGINN.IC': 0.9,  # Placeholder for Reginn
-    'EIK.IC': 0.7     # Placeholder for Eik
+    'ARION.IC': 1.0
 }
 
 
-def conduct_sensitivity_analysis(company_ticker, initial_params, roe_range, ke_range, sgr_range): # Renamed bank_ticker to company_ticker
+def conduct_sensitivity_analysis(bank_ticker, initial_params, roe_range, ke_range, sgr_range):
     '''
-    Conducts sensitivity analysis for a given company across specified ranges of ROE, Ke, and SGR.
+    Conducts sensitivity analysis for a given bank across specified ranges of ROE, Ke, and SGR.
     '''
     sensitivity_results = []
     for roe_val in roe_range:
@@ -251,7 +225,7 @@ def conduct_sensitivity_analysis(company_ticker, initial_params, roe_range, ke_r
                     stable_growth_rate=sgr_val
                 )
                 sensitivity_results.append({
-                    'Ticker': company_ticker, # Renamed
+                    'Ticker': bank_ticker,
                     'Test_ROE': roe_val,
                     'Test_Ke': ke_val,
                     'Test_SGR': sgr_val,
@@ -261,15 +235,15 @@ def conduct_sensitivity_analysis(company_ticker, initial_params, roe_range, ke_r
 
 def main():
     st.set_page_config(layout="wide")
-    st.title('Excess Return Model (ERM) Valuation for the Icelandic Market') # Updated title
+    st.title('Excess Return Model (ERM) Valuation for Icelandic Banks')
 
     st.markdown('''
-    This application allows you to perform Excess Return Model (ERM) valuation for selected Icelandic companies,
-    including banks and real estate firms. Adjust the key valuation parameters below to see their impact on the intrinsic value.
-    ''') # Updated intro text
+    This application allows you to perform Excess Return Model (ERM) valuation for selected Icelandic banks.
+    Adjust the key valuation parameters below to see their impact on the intrinsic value.
+    ''')
 
     # --- Fetch and Process Data (called once at app startup/rerun) ---
-    company_data, messages = fetch_and_process_company_data() # Renamed function call
+    bank_data, messages = fetch_and_process_bank_data()
 
     # Display any warnings/errors from data fetching
     for msg in messages:
@@ -278,8 +252,8 @@ def main():
         else:
             st.warning(msg)
 
-    if not company_data: # Renamed variable
-        st.error("No company data available for valuation. Please check ticker symbols or yfinance access.")
+    if not bank_data:
+        st.error("No bank data available for valuation. Please check ticker symbols or yfinance access.")
         return # Stop if no data is available
 
     st.subheader("Valuation Inputs")
@@ -289,19 +263,9 @@ def main():
     risk_free_rate = st.sidebar.slider('Risk-Free Rate (Rf)', min_value=0.00, max_value=0.10, value=0.065, step=0.001, format='%.3f')
     equity_risk_premium = st.sidebar.slider('Equity Risk Premium (ERP)', min_value=0.01, max_value=0.10, value=0.0575, step=0.001, format='%.3f')
 
-
-    # Company-Specific Inputs
-    st.header("Company-Specific Inputs")
-
-    # Dynamically adjust columns based on the number of companies
-    # Max 3 columns for better readability if many companies
-    num_companies = len(company_data)
-    cols_per_row = min(num_companies, 3)
-    # Use st.columns directly instead of a loop if more control is needed,
-    # or loop through expanders if space is a concern.
-
-    # For this task, we will create columns dynamically.
-    all_cols = st.columns(num_companies) if num_companies <= 3 else st.columns(3)
+    # Bank-Specific Inputs
+    st.header("Bank-Specific Inputs")
+    cols = st.columns(len(bank_data))
 
     user_beta_values = {}
     user_normalized_roes = {}
@@ -310,8 +274,8 @@ def main():
 
     calculated_cost_of_equities = {}
 
-    for i, (ticker, data) in enumerate(company_data.items()): # Renamed variable
-        with all_cols[i % len(all_cols)]: # Distribute companies across columns
+    for i, (ticker, data) in enumerate(bank_data.items()):
+        with cols[i]:
             st.subheader(f"{ticker}")
             st.write(f"Current Share Price: {data['current_share_price']:.2f}")
             st.write(f"Latest BVPS: {data['latest_bvps']:.2f}")
@@ -321,7 +285,7 @@ def main():
                 f'Beta for {ticker}',
                 min_value=0.5,
                 max_value=2.0,
-                value=initial_beta_values.get(ticker, 1.0), # Use initial beta or default
+                value=initial_beta_values.get(ticker, 1.0),
                 step=0.05,
                 format='%.2f',
                 key=f'beta_{ticker}'
@@ -331,7 +295,7 @@ def main():
                 f'Normalized ROE for {ticker}',
                 min_value=0.00,
                 max_value=0.25,
-                value=data['normalized_roe'], # Use dynamically calculated normalized ROE
+                value=data['normalized_roe'],
                 step=0.005,
                 format='%.3f',
                 key=f'roe_{ticker}'
@@ -366,14 +330,14 @@ def main():
     valuation_summary_data = []
     all_sensitivity_dfs = []
 
-    for ticker, data in company_data.items(): # Renamed variable
+    for ticker, data in bank_data.items():
         current_ke = calculated_cost_of_equities[ticker]
         current_roe = user_normalized_roes[ticker]
         current_forecast_period = user_forecast_periods[ticker]
         current_stable_growth_rate = user_stable_growth_rates[ticker]
 
-        # This is a local copy of data for use within the loop, including current user inputs
-        data_for_current_valuation = data.copy() # Avoid modifying the original data directly
+        # This is a local copy of bank_data for use within the loop, including current user inputs
+        data_for_current_valuation = data.copy() # Avoid modifying the original bank_data directly
         data_for_current_valuation['normalized_roe'] = current_roe
         data_for_current_valuation['cost_of_equity'] = current_ke
         data_for_current_valuation['forecast_period'] = current_forecast_period
@@ -396,7 +360,7 @@ def main():
             difference = f"{intrinsic_value - data['current_share_price']:.2f}"
 
         valuation_summary_data.append({
-            'Company': ticker, # Renamed column
+            'Bank': ticker,
             'Current Price': f"{data['current_share_price']:.2f}",
             'Intrinsic Value': intrinsic_value_str,
             'Difference (Intrinsic - Current)': difference,
@@ -406,7 +370,7 @@ def main():
             'Stable Growth Rate': f"{current_stable_growth_rate:.2%}"
         })
 
-        # Define sensitivity ranges based on current user inputs for this company
+        # Define sensitivity ranges based on current user inputs for this bank
         roe_sens_range = np.linspace(data_for_current_valuation['normalized_roe'] - 0.02, data_for_current_valuation['normalized_roe'] + 0.02, 5)
         ke_sens_range = np.linspace(data_for_current_valuation['cost_of_equity'] - 0.01, data_for_current_valuation['cost_of_equity'] + 0.01, 5)
         sgr_sens_range = np.linspace(data_for_current_valuation['stable_growth_rate'] - 0.01, data_for_current_valuation['stable_growth_rate'] + 0.01, 5)
@@ -416,25 +380,25 @@ def main():
         ke_sens_range[ke_sens_range < 0] = 0
         sgr_sens_range[sgr_sens_range < 0] = 0
 
-        # Conduct sensitivity analysis for each company using current inputs
-        sensitivity_df_company = conduct_sensitivity_analysis( # Renamed variable
+        # Conduct sensitivity analysis for each bank using current inputs
+        sensitivity_df_bank = conduct_sensitivity_analysis(
             ticker,
             data_for_current_valuation, # Pass the locally updated data
             roe_sens_range,
             ke_sens_range,
             sgr_sens_range
         )
-        all_sensitivity_dfs.append(sensitivity_df_company) # Renamed variable
+        all_sensitivity_dfs.append(sensitivity_df_bank)
 
     valuation_summary_df = pd.DataFrame(valuation_summary_data)
-    st.table(valuation_summary_df.set_index('Company')) # Renamed index
+    st.table(valuation_summary_df.set_index('Bank'))
 
     # --- Interactive Sensitivity Analysis ---
     st.header("Interactive Sensitivity Analysis")
-    selected_companies = st.multiselect( # Renamed variable
-        'Select companies for sensitivity analysis',
-        options=list(company_data.keys()), # Renamed variable
-        default=list(company_data.keys())
+    selected_banks = st.multiselect(
+        'Select banks for sensitivity analysis',
+        options=list(bank_data.keys()),
+        default=list(bank_data.keys())
     )
 
     # Combine all sensitivity dataframes
@@ -443,21 +407,21 @@ def main():
         # Drop rows where intrinsic_value is NaN due to Ke <= SGR
         full_sensitivity_df = full_sensitivity_df.dropna(subset=['Intrinsic_Value'])
 
-        if selected_companies: # Renamed variable
-            filtered_sensitivity_df = full_sensitivity_df[full_sensitivity_df['Ticker'].isin(selected_companies)] # Renamed variable
+        if selected_banks:
+            filtered_sensitivity_df = full_sensitivity_df[full_sensitivity_df['Ticker'].isin(selected_banks)]
 
-            for ticker in selected_companies: # Renamed variable
+            for ticker in selected_banks:
                 st.markdown(f"#### Sensitivity for {ticker}")
-                company_df = filtered_sensitivity_df[filtered_sensitivity_df['Ticker'] == ticker] # Renamed variable
+                bank_df = filtered_sensitivity_df[filtered_sensitivity_df['Ticker'] == ticker]
 
                 # Define initial_params here for use in plotting sections
                 initial_params_for_plotting = {
-                    'latest_bvps': company_data[ticker]['latest_bvps'], # Renamed variable
+                    'latest_bvps': bank_data[ticker]['latest_bvps'],
                     'normalized_roe': user_normalized_roes[ticker],
                     'cost_of_equity': calculated_cost_of_equities[ticker],
-                    'bvps_growth_rate': company_data[ticker]['bvps_growth_rate'], # Renamed variable
-                    'forecast_period': user_forecast_periods[ticker], # Use company-specific input
-                    'stable_growth_rate': user_stable_growth_rates[ticker] # Use company-specific input
+                    'bvps_growth_rate': bank_data[ticker]['bvps_growth_rate'],
+                    'forecast_period': user_forecast_periods[ticker],
+                    'stable_growth_rate': user_stable_growth_rates[ticker]
                 }
 
                 # Define numerical ranges for plotting axes based on initial_params_for_plotting
@@ -469,11 +433,12 @@ def main():
                 plot_roe_sens_range_numerical[plot_roe_sens_range_numerical < 0] = 0
 
 
-                # Get the current stable growth rate for this company, as used in the sensitivity ranges
-                current_sgr_for_table = user_stable_growth_rates[ticker] # Use company-specific stable growth rate
+                # Get the current stable growth rate for this bank, as used in the sensitivity ranges
+                current_sgr_for_table = user_stable_growth_rates[ticker] # Use the global stable growth rate from the slider
 
-                # Sensitivity of Intrinsic Value to ROE and Ke (fixing SGR at current company-specific value)
-                sgr_fixed_df = company_df[np.isclose(company_df['Test_SGR'], current_sgr_for_table)] # Renamed variable
+                # Sensitivity of Intrinsic Value to ROE and Ke (fixing SGR at current global value)
+                # Filter by the exact current_sgr_for_table, or the closest value in the sgr_sens_range if exact match not present
+                sgr_fixed_df = bank_df[np.isclose(bank_df['Test_SGR'], current_sgr_for_table)]
 
                 if not sgr_fixed_df.empty:
                     sensitivity_table = sgr_fixed_df.pivot_table(
@@ -503,12 +468,12 @@ def main():
                     )
                     st.plotly_chart(fig_3d)
                 else:
-                    st.info(f"No valid data to display ROE vs Ke sensitivity for {ticker} at the current stable growth rate. Adjust SGR or ranges.")
+                    st.info(f"No valid data to display ROE vs Ke sensitivity for {ticker} at the current stable growth rate. Adjust global SGR or ranges.")
 
                 # Impact of Stable Growth Rate (fixing ROE and Ke at current user-defined values)
-                sgr_impact_df = company_df[ # Renamed variable
-                    (np.isclose(company_df['Test_ROE'], initial_params_for_plotting['normalized_roe'])) and \
-                    (np.isclose(company_df['Test_Ke'], initial_params_for_plotting['cost_of_equity']))
+                sgr_impact_df = bank_df[
+                    (np.isclose(bank_df['Test_ROE'], initial_params_for_plotting['normalized_roe'])) &
+                    (np.isclose(bank_df['Test_Ke'], initial_params_for_plotting['cost_of_equity']))
                 ].sort_values(by='Test_SGR')
 
                 if not sgr_impact_df.empty:
@@ -529,7 +494,7 @@ def main():
                     st.info(f"No valid data to display Stable Growth Rate impact for {ticker}. Adjust ROE/Ke or SGR ranges.")
 
         else:
-            st.info("Select at least one company to view sensitivity analysis.")
+            st.info("Select at least one bank to view sensitivity analysis.")
     else:
         st.info("No sensitivity analysis data available.")
 
